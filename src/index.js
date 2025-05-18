@@ -7,8 +7,9 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 
 // Configuration
-const ALLOWED_ORIGIN = 'https://your-pabbly-connect-domain.com'; // Replace with your Pabbly domain
-const ZOHO_TOKEN_URL = 'https://accounts.zoho.com/oauth/v2/token';
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN; // Replace with your Pabbly domain
+const ZOHO_TOKEN_URL = process.env.ZOHO_TOKEN_URL;
+// const ZOHO_REVOKE_URL = process.env.ZOHO_REVOKE_URL;
 const PORT = process.env.PORT || 3000;
 
 // Rate limiting (100 requests per 15 minutes)
@@ -21,19 +22,31 @@ const limiter = rateLimit({
 // CORS configuration
 const corsOptions = {
   origin: (origin, callback) => {
+    // Allow requests with no Origin (like same-origin or non-browser tools)
+    if (!origin) return callback(null, true);  // 👈 Add this line
+    
     if (origin === ALLOWED_ORIGIN) {
       callback(null, true);
     } else {
       callback(new Error('Not allowed by CORS'));
     }
-  },
-  optionsSuccessStatus: 200
+  }
 };
 
 // Middleware
 app.use(express.json());
 app.use(cors(corsOptions));
 app.use(limiter);
+
+function getClientInfo(req) {
+  const clientIP = req.ip;
+  const userAgent = req.headers['user-agent'];
+  const fullUrl = req.protocol + '://' + req.get('host') + req.originalUrl;
+
+  console.log('Client IP:', clientIP);
+  console.log('User-Agent:', userAgent);
+  console.log('Full URL Requested:', fullUrl);
+}
 
 // Token storage (use Redis in production)
 let tokenStore = {
@@ -60,14 +73,33 @@ async function refreshZohoToken() {
 
     return tokenStore.accessToken;
   } catch (error) {
+    console.log(ZOHO_TOKEN_URL)
     console.error('Token refresh failed:', error.response?.data || error.message);
     throw new Error('Failed to refresh token');
   }
 }
 
+// // Token revoke function (not yet working properly)
+// async function revokeAccessToken() {
+//   if (!tokenStore.accessToken) return;
+  
+//   try {
+//     await axios.post(ZOHO_REVOKE_URL, new URLSearchParams({
+//       token: tokenStore.accessToken
+//     }));
+    
+//     console.log('Successfully revoked access token');
+//   } catch (error) {
+//     console.error('Revocation failed:', error.response?.data || error.message);
+//   }
+// }
+
 // Token endpoint
 app.get('/api/token', async (req, res) => {
   try {
+    // Get some Client Info
+    getClientInfo(req);
+    
     // Return cached token if still valid
     if (tokenStore.accessToken && Date.now() < tokenStore.expiresAt - 60000) {
       return res.json({
@@ -102,6 +134,19 @@ app.use((err, req, res, next) => {
   }
   res.status(500).json({ error: 'Internal server error' });
 });
+
+// Add this right before app.listen()
+// let server;
+
+// const shutdown = async () => {
+//   console.log('Shutting down gracefully...');
+//   await revokeAccessToken();
+//   server?.close();
+//   process.exit(0);
+// };
+
+// process.on('SIGTERM', shutdown);
+// process.on('SIGINT', shutdown);
 
 app.listen(PORT, () => {
   console.log(`Token service running on port ${PORT}`);
