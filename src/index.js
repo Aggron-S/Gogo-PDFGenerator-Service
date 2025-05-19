@@ -3,16 +3,26 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
+const fs = require('fs');
+const path = require('path');
+const https = require('https');
+const FormData = require('form-data');
+
 
 const app = express();
 
 // Configuration
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN; // Replace with your Pabbly domain
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 const ZOHO_TOKEN_URL = process.env.ZOHO_TOKEN_URL;
-// const ZOHO_REVOKE_URL = process.env.ZOHO_REVOKE_URL;
 const PORT = process.env.PORT || 3000;
+const TEMP_DIR = path.join(__dirname, 'temp');
 
-// Rate limiting (100 requests per 15 minutes)
+// Create temp directory if it doesn't exist
+if (!fs.existsSync(TEMP_DIR)) {
+  fs.mkdirSync(TEMP_DIR);
+}
+
+// Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 100,
@@ -22,9 +32,7 @@ const limiter = rateLimit({
 // CORS configuration
 const corsOptions = {
   origin: (origin, callback) => {
-    // Allow requests with no Origin (like same-origin or non-browser tools)
-    if (!origin) return callback(null, true);  // 👈 Add this line
-    
+    if (!origin) return callback(null, true);     // ayuin logic ng CORS if may time
     if (origin === ALLOWED_ORIGIN) {
       callback(null, true);
     } else {
@@ -38,22 +46,29 @@ app.use(express.json());
 app.use(cors(corsOptions));
 app.use(limiter);
 
-function getClientInfo(req) {
-  const clientIP = req.ip;
-  const userAgent = req.headers['user-agent'];
-  const fullUrl = req.protocol + '://' + req.get('host') + req.originalUrl;
-
-  console.log('Client IP:', clientIP);
-  console.log('User-Agent:', userAgent);
-  console.log('Full URL Requested:', fullUrl);
-}
-
-// Token storage (use Redis in production)
+// Token storage
 let tokenStore = {
   accessToken: null,
   expiresAt: 0,
   refreshToken: process.env.ZOHO_REFRESH_TOKEN
 };
+
+// Helper function to download file from URL
+async function downloadFile(url, filePath) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(filePath);
+    https.get(url, (response) => {
+      response.pipe(file);
+      file.on('finish', () => {
+        console.log(`File written to ${filePath}`);
+        file.close(resolve);
+      });
+    }).on('error', (err) => {
+      fs.unlink(filePath, () => {});
+      reject(err);
+    });
+  });
+}
 
 // Token refresh function
 async function refreshZohoToken() {
@@ -68,56 +83,111 @@ async function refreshZohoToken() {
     tokenStore = {
       accessToken: response.data.access_token,
       expiresAt: Date.now() + (response.data.expires_in * 1000),
-      refreshToken: tokenStore.refreshToken // Refresh token remains the same
+      refreshToken: tokenStore.refreshToken
     };
 
     return tokenStore.accessToken;
   } catch (error) {
-    console.log(ZOHO_TOKEN_URL)
     console.error('Token refresh failed:', error.response?.data || error.message);
     throw new Error('Failed to refresh token');
   }
 }
 
-// // Token revoke function (not yet working properly)
-// async function revokeAccessToken() {
-//   if (!tokenStore.accessToken) return;
-  
-//   try {
-//     await axios.post(ZOHO_REVOKE_URL, new URLSearchParams({
-//       token: tokenStore.accessToken
-//     }));
-    
-//     console.log('Successfully revoked access token');
-//   } catch (error) {
-//     console.error('Revocation failed:', error.response?.data || error.message);
-//   }
-// }
+// Get valid access token (checks expiration and refreshes if needed)
+async function getValidToken() {
+  if (tokenStore.accessToken && Date.now() < tokenStore.expiresAt - 60000) {
+    return tokenStore.accessToken;
+  }
+  return await refreshZohoToken();
+}
 
-// Token endpoint
-app.get('/api/token', async (req, res) => {
+// Upload file to Zoho Creator
+async function uploadToZohoCreator(filePath, recordId, fieldLinkName, helper_surname, helper_givenName, doc_type) {
+  const accessToken = await getValidToken();
+  
+  const uploadUrl = `https://www.zohoapis.com/creator/v2.1/data/raolay25/my-first-creator-app/report/Sheet1_Report/${recordId}/${fieldLinkName}/upload?skip_workflow=["schedules","form_workflow"]`
+  
+  // Create form data with proper file attachment
+  const form = new FormData();
+  form.append('file', fs.createReadStream(filePath), {
+    filename: `${helper_surname}, ${helper_givenName}-${doc_type}.pdf`,
+    contentType: 'application/pdf'
+  });
+
+  const response = await axios.post(uploadUrl, form, {
+    headers: {
+      'Authorization': `Zoho-oauthtoken ${accessToken}`,
+      ...form.getHeaders() // This adds the proper multipart headers
+    },
+    maxContentLength: Infinity, // For larger files
+    maxBodyLength: Infinity    // For larger files
+  });
+
+  return response.data;
+}
+
+// File upload endpoint
+app.post('/upload-file', async (req, res) => {
   try {
-    // Get some Client Info
-    getClientInfo(req);
+    const { canva_design_export_url, record_id, field_link_name, helper_surname, helper_givenName, doc_type } = req.body;
     
-    // Return cached token if still valid
-    if (tokenStore.accessToken && Date.now() < tokenStore.expiresAt - 60000) {
-      return res.json({
-        access_token: tokenStore.accessToken,
-        expires_in: Math.floor((tokenStore.expiresAt - Date.now()) / 1000)
-      });
+    if (!canva_design_export_url 
+      || !record_id 
+      || !field_link_name 
+      || !helper_surname 
+      || !helper_givenName 
+      || !doc_type
+    ) {
+      return res.status(400).json({ error: 'Missing required parameters' });
     }
 
-    // Refresh token if expired
-    const newToken = await refreshZohoToken();
-    res.json({
-      access_token: newToken,
-      expires_in: Math.floor((tokenStore.expiresAt - Date.now()) / 1000)
-    });
+    // Generate temp file path
+    const tempFilePath = path.join(TEMP_DIR, `canva-export-${Date.now()}.pdf`);
+    
+    try {
+      // Step 1: Download the Canva file
+      console.log('Downloading file from Canva...');
+      await downloadFile(canva_design_export_url, tempFilePath);
+
+      // Step 2: Upload to Zoho Creator
+      console.log('Uploading to Zoho Creator...');
+      const uploadResult = await uploadToZohoCreator(
+        tempFilePath, 
+        record_id, 
+        field_link_name, 
+        helper_surname, 
+        helper_givenName, 
+        doc_type
+      );
+
+      // Step 3: Clean up temp file
+      fs.unlink(tempFilePath, (err) => {
+        if (err) console.error('Error deleting temp file:', err);
+        else console.log('Temp file deleted:', tempFilePath);
+      });
+      
+      return res.json({
+        success: true,
+        message: 'File uploaded successfully',
+        result: uploadResult
+      });
+    } catch (error) {
+      // Clean up temp file if it exists
+      if (fs.existsSync(tempFilePath)) {
+        fs.unlinkSync(tempFilePath);
+      }
+      
+      console.error('Upload process failed:', error);
+      return res.status(500).json({ 
+        error: 'File processing failed',
+        details: error.message 
+      });
+    }
   } catch (error) {
-    res.status(500).json({
-      error: 'Token refresh failed',
-      details: error.message
+    console.error('Server error:', error);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      details: error.message 
     });
   }
 });
@@ -135,19 +205,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Add this right before app.listen()
-// let server;
-
-// const shutdown = async () => {
-//   console.log('Shutting down gracefully...');
-//   await revokeAccessToken();
-//   server?.close();
-//   process.exit(0);
-// };
-
-// process.on('SIGTERM', shutdown);
-// process.on('SIGINT', shutdown);
-
 app.listen(PORT, () => {
-  console.log(`Token service running on port ${PORT}`);
+  console.log(`File upload service running on port ${PORT}`);
 });
