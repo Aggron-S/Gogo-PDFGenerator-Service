@@ -300,7 +300,7 @@ app.post('/upload-file', async (req, res) => {
 app.post('/upload-to-dropbox', upload.single('file'), async (req, res) => {
   try {
     console.log('Received upload request');
-    
+    console.log("Request body: ", req.body)
     // Validate the file
     if (!req.file) {
       console.error('No file received in request');
