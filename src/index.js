@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
+const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -11,9 +12,20 @@ const FormData = require('form-data');
 
 const app = express();
 
+// Multer
+const storage = multer.memoryStorage(); // Store files in memory as buffers
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024 // 50MB limit
+  }
+});
+
+
 // Configuration
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 const ZOHO_TOKEN_URL = process.env.ZOHO_TOKEN_URL;
+const DROPBOX_TOKEN_URL = process.env.DROPBOX_TOKEN_URL;
 const PORT = process.env.PORT || 3000;
 const TEMP_DIR = path.join(__dirname, 'temp');
 
@@ -48,11 +60,19 @@ app.use(limiter);
 
 // Token storage
 let tokenStore = {
-  accessToken: null,
-  expiresAt: 0,
-  refreshToken: process.env.ZOHO_REFRESH_TOKEN
+  zoho: {
+    accessToken: null,
+    expiresAt: 0,
+    refreshToken: process.env.ZOHO_REFRESH_TOKEN
+  },
+  dropbox: {
+    accessToken: null,
+    expiresAt: 0,
+    refreshToken: process.env.DROPBOX_REFRESH_TOKEN
+  }
 };
 
+// ===== Zoho Creator ===== //
 // Helper function to download file from URL
 async function downloadFile(url, filePath) {
   return new Promise((resolve, reject) => {
@@ -74,19 +94,19 @@ async function downloadFile(url, filePath) {
 async function refreshZohoToken() {
   try {
     const response = await axios.post(ZOHO_TOKEN_URL, new URLSearchParams({
-      refresh_token: tokenStore.refreshToken,
+      refresh_token: tokenStore.zoho.refreshToken,
       client_id: process.env.ZOHO_CLIENT_ID,
       client_secret: process.env.ZOHO_CLIENT_SECRET,
       grant_type: 'refresh_token'
     }));
 
-    tokenStore = {
+    tokenStore.zoho = {
       accessToken: response.data.access_token,
       expiresAt: Date.now() + (response.data.expires_in * 1000),
-      refreshToken: tokenStore.refreshToken
+      refreshToken: tokenStore.zoho.refreshToken
     };
 
-    return tokenStore.accessToken;
+    return tokenStore.zoho.accessToken;
   } catch (error) {
     console.error('Token refresh failed:', error.response?.data || error.message);
     throw new Error('Failed to refresh token');
@@ -95,8 +115,8 @@ async function refreshZohoToken() {
 
 // Get valid access token (checks expiration and refreshes if needed)
 async function getValidToken() {
-  if (tokenStore.accessToken && Date.now() < tokenStore.expiresAt - 60000) {
-    return tokenStore.accessToken;
+  if (tokenStore.zoho.accessToken && Date.now() < tokenStore.zoho.expiresAt - 60000) {
+    return tokenStore.zoho.accessToken;
   }
   return await refreshZohoToken();
 }
@@ -126,7 +146,89 @@ async function uploadToZohoCreator(filePath, recordId, fieldLinkName, helper_sur
   return response.data;
 }
 
-// File upload endpoint
+
+
+// ===== Dropbox ===== //
+async function refreshDropboxToken() {
+  try {
+    const response = await axios.post(DROPBOX_TOKEN_URL, new URLSearchParams({
+      refresh_token: tokenStore.dropbox.refreshToken,
+      grant_type: 'refresh_token',
+      client_id: process.env.DROPBOX_CLIENT_ID,
+      client_secret: process.env.DROPBOX_CLIENT_SECRET
+    }));
+
+    tokenStore.dropbox.accessToken = response.data.access_token;
+    tokenStore.dropbox.expiresAt = Date.now() + (response.data.expires_in * 1000);
+    
+    return tokenStore.dropbox.accessToken;
+  } catch (error) {
+    console.error('Dropbox token refresh failed:', error.response?.data || error.message);
+    throw new Error('Failed to refresh Dropbox token');
+  }
+}
+
+async function getValidDropboxToken() {
+  if (tokenStore.dropbox.accessToken && Date.now() < tokenStore.dropbox.expiresAt - 60000) {
+    return tokenStore.dropbox.accessToken;
+  }
+  return await refreshDropboxToken();
+}
+
+async function uploadToDropbox(fileBuffer, fileName, fileSize) {
+  try {
+    console.log(`Preparing to upload ${fileName} (${fileSize} bytes) to Dropbox`);
+    
+    // Validate inputs
+    if (!fileBuffer || fileBuffer.length === 0) {
+      throw new Error('File buffer is empty');
+    }
+    if (!fileName) {
+      throw new Error('Filename is required');
+    }
+
+    // Get valid token
+    const accessToken = await getValidDropboxToken();
+    const dropboxPath = `/uploads/${fileName}`;
+
+    console.log(`Uploading to Dropbox path: ${dropboxPath}`);
+    
+    const response = await axios.post(
+      'https://content.dropboxapi.com/2/files/upload',
+      fileBuffer,
+      {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Dropbox-API-Arg': JSON.stringify({
+            path: dropboxPath,
+            mode: 'add',
+            autorename: true,
+            mute: false
+          }),
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': fileSize
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
+      }
+    );
+
+    console.log('Dropbox upload successful');
+    return {
+      path: dropboxPath,
+      // result: response.data
+    };
+  } catch (error) {
+    console.error('Dropbox upload failed:', {
+      message: error.message,
+      stack: error.stack,
+      response: error.response?.data
+    });
+    throw error; // Re-throw for route handler to catch
+  }
+}
+
+// Zoho Creator File Upload Endpoint
 app.post('/upload-file', async (req, res) => {
   try {
     const { canva_design_export_url, record_id, field_link_name, helper_surname, helper_givenName, doc_type } = req.body;
@@ -191,6 +293,52 @@ app.post('/upload-file', async (req, res) => {
     });
   }
 });
+
+
+// Dropbox File Upload Endpoint
+// ===== Dropbox Upload Endpoint ===== //
+app.post('/upload-to-dropbox', upload.single('file'), async (req, res) => {
+  try {
+    console.log('Received upload request');
+    
+    // Validate the file
+    if (!req.file) {
+      console.error('No file received in request');
+      return res.status(400).json({ 
+        error: 'No file received',
+        details: 'The request did not contain a file upload'
+      });
+    }
+
+    console.log(`Processing file: ${req.file.originalname}, Size: ${req.file.size}`);
+
+    // Process upload using the uploadToDropbox function
+    const fileName = req.file.originalname || `file-${Date.now()}.pdf`;
+    const { path /*, result*/ } = await uploadToDropbox(
+      req.file.buffer,
+      fileName,
+      req.file.size
+    );
+
+    return res.json({
+      success: true,
+      message: 'File uploaded to Dropbox',
+      path: path,
+      // result: result
+    });
+
+  } catch (error) {
+    console.error('Upload endpoint failed:', error.message);
+    return res.status(500).json({ 
+      error: 'File processing failed',
+      details: error.message,
+      ...(process.env.NODE_ENV === 'development' && {
+        stack: error.stack
+      })
+    });
+  }
+});
+
 
 // Health check
 app.get('/ping', (req, res) => {
