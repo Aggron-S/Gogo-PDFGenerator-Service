@@ -12,14 +12,14 @@ const FormData = require('form-data');
 
 const app = express();
 
-// Multer
-const storage = multer.memoryStorage(); // Store files in memory as buffers
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
+// Custom multer configuration for Zoho Creator
+const zohoFileParser = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: (req, file, cb) => {
+    // Accept all files (or add your own validation)
+    cb(null, true);
   }
-});
+}).single('file'); // Must match the "file" key used in Zoho
 
 
 // Configuration
@@ -297,46 +297,68 @@ app.post('/upload-file', async (req, res) => {
 
 // Dropbox File Upload Endpoint
 // ===== Dropbox Upload Endpoint ===== //
-app.post('/upload-to-dropbox', upload.single('file'), async (req, res) => {
-  try {
-    console.log('Received upload request');
-    console.log("Request body: ", req.body)
-    // Validate the file
-    if (!req.file) {
-      console.error('No file received in request');
-      return res.status(400).json({ 
-        error: 'No file received',
-        details: 'The request did not contain a file upload'
+app.post('/upload-to-dropbox', (req, res, next) => {
+  // First parse the Zoho-formatted file
+  zohoFileParser(req, res, async (err) => {
+    try {
+      console.log('Raw headers:', req.headers);
+      console.log('Raw body length:', req.body.length);
+
+      if (err) {
+        console.error('File parsing error:', err);
+        return res.status(400).json({
+          error: 'FILE_PARSING_FAILED',
+          details: err.message
+        });
+      }
+
+      if (!req.file) {
+        // Advanced debugging
+        console.log('Request parts:', {
+          headers: req.headers,
+          bodyKeys: Object.keys(req.body),
+          files: req.files
+        });
+        
+        return res.status(400).json({
+          error: 'NO_FILE_RECEIVED',
+          details: 'The server did not receive any file data',
+          debug: {
+            headers: req.headers,
+            bodyType: typeof req.body,
+            bodyLength: req.body.length
+          }
+        });
+      }
+
+      console.log('File successfully parsed:', {
+        name: req.file.originalname,
+        size: req.file.size,
+        mimetype: req.file.mimetype
+      });
+
+      // Process the upload
+      const fileName = req.headers['x-file-name'] || req.file.originalname || `file-${Date.now()}.pdf`;
+      const uploadResult = await uploadToDropbox(
+        req.file.buffer,
+        fileName,
+        req.file.size
+      );
+
+      return res.json({
+        success: true,
+        filePath: uploadResult.path,
+        dropboxResponse: uploadResult.result
+      });
+
+    } catch (error) {
+      console.error('Upload processing error:', error);
+      return res.status(500).json({
+        error: 'UPLOAD_PROCESSING_ERROR',
+        details: error.message
       });
     }
-
-    console.log(`Processing file: ${req.file.originalname}, Size: ${req.file.size}`);
-
-    // Process upload using the uploadToDropbox function
-    const fileName = req.file.originalname || `file-${Date.now()}.pdf`;
-    const { path /*, result*/ } = await uploadToDropbox(
-      req.file.buffer,
-      fileName,
-      req.file.size
-    );
-
-    return res.json({
-      success: true,
-      message: 'File uploaded to Dropbox',
-      path: path,
-      // result: result
-    });
-
-  } catch (error) {
-    console.error('Upload endpoint failed:', error.message);
-    return res.status(500).json({ 
-      error: 'File processing failed',
-      details: error.message,
-      ...(process.env.NODE_ENV === 'development' && {
-        stack: error.stack
-      })
-    });
-  }
+  });
 });
 
 
