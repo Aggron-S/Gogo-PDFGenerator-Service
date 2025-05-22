@@ -298,7 +298,7 @@ app.post('/upload-file', async (req, res) => {
 // Dropbox File Upload Endpoint
 // ===== Dropbox Upload Endpoint ===== //
 // Add to your existing Node.js service
-app.post('/upload-to-dropbox', express.json(), async (req, res) => {
+app.post('/upload-to-dropbox', async (req, res) => {
   let tempFilePath;
   
   try {
