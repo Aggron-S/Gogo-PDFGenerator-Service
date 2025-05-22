@@ -297,48 +297,101 @@ app.post('/upload-file', async (req, res) => {
 
 // Dropbox File Upload Endpoint
 // ===== Dropbox Upload Endpoint ===== //
-app.post('/upload-to-dropbox', upload.single('file'), async (req, res) => {
+// Add to your existing Node.js service
+app.post('/upload-to-dropbox', express.json(), async (req, res) => {
+  let tempFilePath;
+  
   try {
-    console.log('Received upload request');
-    console.log("Request file: ", req.file)
-    // Validate the file
-    if (!req.file) {
-      console.error('No file received in request');
-      return res.status(400).json({ 
-        error: 'No file received',
-        details: 'The request did not contain a file upload'
+    // 1. Extract parameters
+    const { recordId, fieldLinkName, reportLinkName, owner, appLinkName } = req.body;
+    
+    // 2. Validate all required parameters
+    if (!recordId || !fieldLinkName || !reportLinkName || !owner || !appLinkName) {
+      return res.status(400).json({
+        error: 'MISSING_PARAMETERS',
+        message: 'All parameters (recordId, fieldLinkName, reportLinkName, owner, appLinkName) are required'
       });
     }
 
-    console.log(`Processing file: ${req.file.originalname}, Size: ${req.file.size}`);
+    // 3. Generate download URL
+    const downloadUrl = `https://www.zohoapis.com/creator/v2.1/data/${owner}/${appLinkName}/report/${reportLinkName}/${recordId}/${fieldLinkName}/download`;
+    
+    // 4. Create temp directory if needed
+    const tempDir = path.join(__dirname, 'temp');
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir);
+    tempFilePath = path.join(tempDir, `zoho-file-${Date.now()}.pdf`);
 
-    // Process upload using the uploadToDropbox function
-    const fileName = req.file.originalname || `file-${Date.now()}.pdf`;
-    const { path /*, result*/ } = await uploadToDropbox(
-      req.file.buffer,
+    // 5. Get valid Zoho token
+    const zohoToken = await getValidToken(); // Reuses your existing token management
+    
+    // 6. Download file from Zoho Creator
+    console.log(`Downloading file from: ${downloadUrl}`);
+    const response = await axios({
+      method: 'get',
+      url: downloadUrl,
+      responseType: 'stream',
+      headers: {
+        'Authorization': `Zoho-oauthtoken ${zohoToken}`
+      }
+    });
+
+    // 7. Save to temp file
+    const writer = fs.createWriteStream(tempFilePath);
+    response.data.pipe(writer);
+    
+    await new Promise((resolve, reject) => {
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    // 8. Verify downloaded file
+    const stats = fs.statSync(tempFilePath);
+    if (stats.size === 0) {
+      throw new Error('Downloaded file is empty');
+    }
+
+    // 9. Verify it's a PDF (first 4 bytes should be '%PDF')
+    const fileBuffer = fs.readFileSync(tempFilePath);
+    if (fileBuffer.slice(0, 4).toString() !== '%PDF') {
+      throw new Error('Downloaded file is not a valid PDF');
+    }
+
+    // 10. Upload to Dropbox
+    console.log('Uploading to Dropbox...');
+    const fileName = `${fieldLinkName}-${recordId}.pdf`;
+    const uploadResult = await uploadToDropbox(
+      fileBuffer,
       fileName,
-      req.file.size
+      stats.size
     );
+
+    // 11. Clean up
+    fs.unlinkSync(tempFilePath);
 
     return res.json({
       success: true,
-      message: 'File uploaded to Dropbox',
-      path: path,
-      // result: result
+      message: "File processed successfully",
+      dropboxPath: uploadResult.path,
+      fileSize: stats.size,
+      zohoSource: downloadUrl
     });
 
   } catch (error) {
-    console.error('Upload endpoint failed:', error.message);
-    return res.status(500).json({ 
-      error: 'File processing failed',
-      details: error.message,
+    // Clean up temp file if it exists
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
+    
+    console.error('File processing error:', error.message);
+    return res.status(500).json({
+      error: 'PROCESSING_ERROR',
+      message: error.message,
       ...(process.env.NODE_ENV === 'development' && {
         stack: error.stack
       })
     });
   }
 });
-
 
 // Health check
 app.get('/ping', (req, res) => {
