@@ -3,7 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const rateLimit = require('express-rate-limit');
-const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -11,15 +10,6 @@ const FormData = require('form-data');
 
 
 const app = express();
-
-// Multer
-const storage = multer.memoryStorage(); // Store files in memory as buffers
-const upload = multer({
-  storage: storage,
-  limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
-  }
-});
 
 
 // Configuration
@@ -228,6 +218,8 @@ async function uploadToDropbox(fileBuffer, fileName, fileSize) {
   }
 }
 
+
+
 // Zoho Creator File Upload Endpoint
 app.post('/upload-file', async (req, res) => {
   try {
@@ -297,7 +289,6 @@ app.post('/upload-file', async (req, res) => {
 
 // Dropbox File Upload Endpoint
 // ===== Dropbox Upload Endpoint ===== //
-// Add to your existing Node.js service
 app.post('/upload-to-dropbox', async (req, res) => {
   let tempFilePath;
   
