@@ -303,10 +303,28 @@ app.post('/upload-to-dropbox', express.json(), async (req, res) => {
   
   try {
     // 1. Extract parameters
-    const { recordId, fieldLinkName, reportLinkName, owner, appLinkName } = req.body;
+    const { 
+      recordId, 
+      fieldLinkName, 
+      reportLinkName, 
+      owner, 
+      appLinkName,
+      helper_surname,
+      helper_givenName,
+      doc_type
+    } = req.body;
     
     // 2. Validate all required parameters
-    if (!recordId || !fieldLinkName || !reportLinkName || !owner || !appLinkName) {
+    if (
+      !recordId || 
+      !fieldLinkName || 
+      !reportLinkName || 
+      !owner || 
+      !appLinkName ||
+      !helper_surname ||
+      !helper_givenName ||
+      !doc_type
+    ) {
       return res.status(400).json({
         error: 'MISSING_PARAMETERS',
         message: 'All parameters (recordId, fieldLinkName, reportLinkName, owner, appLinkName) are required'
@@ -358,7 +376,7 @@ app.post('/upload-to-dropbox', express.json(), async (req, res) => {
 
     // 10. Upload to Dropbox
     console.log('Uploading to Dropbox...');
-    const fileName = `${fieldLinkName}-${recordId}.pdf`;
+    const fileName = `${helper_surname}, ${helper_givenName}-${doc_type}.pdf`;
     const uploadResult = await uploadToDropbox(
       fileBuffer,
       fileName,
