@@ -334,7 +334,7 @@ app.post('/upload-to-dropbox', async (req, res) => {
     const zohoToken = await getValidToken(); // Reuses your existing token management
     
     // 6. Download file from Zoho Creator
-    console.log(`Downloading file from: ${downloadUrl}`);
+    console.log(`Downloading file from zoho creator...`);
     const response = await axios({
       method: 'get',
       url: downloadUrl,
@@ -379,10 +379,10 @@ app.post('/upload-to-dropbox', async (req, res) => {
 
     return res.json({
       success: true,
-      message: "File processed successfully",
+      message: "File uploaded to Dropbox successfully",
       dropboxPath: uploadResult.path,
-      fileSize: stats.size,
-      zohoSource: downloadUrl
+      // fileSize: stats.size,
+      // zohoSource: downloadUrl
     });
 
   } catch (error) {
