@@ -144,7 +144,7 @@ async function uploadToZohoCreator(
   const accessToken = await getValidToken();
 
   const uploadUrl = `${ZOHO_CREATOR_UPLOAD_URL}/${owner}/${appLinkName}/report/${reportLinkName}/${recordId}/${fieldLinkName}/upload?skip_workflow=["schedules","form_workflow"]`;
-  
+
   // Create form data with proper file attachment
   const form = new FormData();
   form.append("file", fs.createReadStream(filePath), {
@@ -216,7 +216,8 @@ async function uploadToDropbox(fileBuffer, fileName, fileSize) {
 
     // Get valid token
     const accessToken = await getValidDropboxToken();
-    const dropboxPath = `/uploads/${fileName}`;
+    const baseName = fileName.substring(0, fileName.lastIndexOf('-'));    // unique directory for files
+    const dropboxPath = `/uploads/${baseName}/${fileName}`;
 
     console.log(`Uploading to Dropbox path: ${dropboxPath}`);
 
